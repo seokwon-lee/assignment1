@@ -384,13 +384,13 @@ void WB_stage()
 {
     /* You MUST call free_op function here after an op is retired */
     /* you must complete the function */
-    if (op->opcode != OP_NOP)
-    {
-        active_op_num--;
-    }
     if (MEM_latch->op_valid == true) {
-        Op* op = MEM_latch->op
-            free_op(op);
+        if (op->opcode != OP_NOP)
+        {
+            active_op_num--;
+        }
+        Op* op = MEM_latch->op;
+        free_op(op);
         retired_instruction++;
     }
 }
@@ -402,7 +402,6 @@ void MEM_stage()
         if (op->mem_type == MEM_LD)
             if (!dcache_access(op->ld_vaddr)) {
                 dcache_miss_count++;
-                cycle_count += 1;
             }
         if (op->mem_type == MEM_ST) {
             if (!dcache_access(op->st_vaddr))
@@ -442,12 +441,12 @@ void ID_stage()
             data_hazard_count++;
             cycle_count += 2;
         }
-        else if (op->num_src >= 2 && op->src[1] == MEM_latch->op->dst)){
+        else if (op->num_src >= 2 && op->src[1] == MEM_latch->op->dst){
             data_hazard_count++;
             cycle_count += 1;
         }
 
-        if (op->cftype != NOT_CF) {
+        if (op->cf_type != NOT_CF) {
             control_hazard_count++;
             cycle_count += 2;
         }
