@@ -344,93 +344,113 @@ bool run_a_cycle(){
 
   for (;;) { 
     if (((KNOB(KNOB_MAX_SIM_COUNT)->getValue() && (cycle_count >= KNOB(KNOB_MAX_SIM_COUNT)->getValue())) || 
-      (KNOB(KNOB_MAX_INST_COUNT)->getValue() && (retired_instruction >= KNOB(KNOB_MAX_INST_COUNT)->getValue())) ||  (sim_end_condition))) { 
-        // please complete sim_end_condition 
-        // finish the simulation 
-        print_heartbeat(); 
-        print_stats();
-        return TRUE; 
+(KNOB(KNOB_MAX_INST_COUNT)->getValue() && (retired_instruction >= KNOB(KNOB_MAX_INST_COUNT)->getValue())) || (sim_end_condition))) {
+// please complete sim_end_condition 
+// finish the simulation 
+print_heartbeat();
+print_stats();
+return TRUE;
     }
-    cycle_count++; 
-    if (!(cycle_count%5000)) {
-      print_heartbeat(); 
+    cycle_count++;
+    if (!(cycle_count % 5000)) {
+        print_heartbeat();
     }
-    WB_stage(); 
+    WB_stage();
     MEM_stage();
     EX_stage();
     ID_stage();
-    FE_stage(); 
-    if (KNOB(KNOB_PRINT_PIPE_FREQ)->getValue() && !(cycle_count%KNOB(KNOB_PRINT_PIPE_FREQ)->getValue())) print_pipeline();
+    FE_stage();
+    if (KNOB(KNOB_PRINT_PIPE_FREQ)->getValue() && !(cycle_count % KNOB(KNOB_PRINT_PIPE_FREQ)->getValue())) print_pipeline();
   }
-  return TRUE; 
+  return TRUE;
 }
 
 
 /*******************************************************************/
 /* Complete the following fuctions.  */
-/* You can add new data structures and also new elements to Op, Pipeline_latch data structure */ 
+/* You can add new data structures and also new elements to Op, Pipeline_latch data structure */
 /*******************************************************************/
 
 void init_structures(void)
 {
-  init_op_pool(); 
-  init_op_latency();
-  /* please initialize other data stucturs */ 
-  /* you must complete the function */
-  init_latches();
+    init_op_pool();
+    init_op_latency();
+    /* please initialize other data stucturs */
+    /* you must complete the function */
+    init_latches();
 }
 
 void WB_stage()
 {
-  /* You MUST call free_op function here after an op is retired */ 
-  /* you must complete the function */
-  free_op(op);
-  retired_instruction++;
+    /* You MUST call free_op function here after an op is retired */
+    /* you must complete the function */
+    if (op->opcode != OP_NOP)
+    {
+        active_op_num--;
+    }
+    if (MEM_latch->op_valid == true) {
+        Op* op = MEM_latch->op
+            free_op(op);
+        retired_instruction++;
+    }
 }
 
 void MEM_stage()
-{ 
-    if (op->mem_type == MEM_LD)
-        if (!dcache_access(op->ld_vaddr))
-            dcache_miss_count++;
-    if (op->mem_type == MEM_ST)
-        if (!dcache_access(op->st_vaddr))
-            dcache_miss_count++;
-    FE_latch->op->instruction_addr = op->branch_target;
-  /* you must complete the function */
+{
+    if (EX_latch->op_valid == true) {
+        Op* op = EX_latch->op;
+        if (op->mem_type == MEM_LD)
+            if (!dcache_access(op->ld_vaddr)) {
+                dcache_miss_count++;
+                cycle_count += 1;
+            }
+        if (op->mem_type == MEM_ST) {
+            if (!dcache_access(op->st_vaddr))
+                dcache_miss_count++;
+        }
+
+        FE_latch->op->instruction_addr = op->branch_target;
+        /* you must complete the function */
+    }
 }
 
-
-void EX_stage() 
+void EX_stage()
 {
     if (ID_latch->op_valid == true) {
         Op* op = ID_latch->op;
-        if (op->opcode == OP_CF) {
-            control_hazard_count++;
-        }
-        int cycle_num = cycle_count;
+        cycle_count += get_op_latency(op) - 1;//FE,ID stage stall 필요
     }
-
-    if (cycle_count - cycle_num < get_op_latency(op)-1 )
-    {
-        FE_latch->op_valid = false; 
-        ID_latch->op_valid = false;
-    }//FE,ID stage stall 필요
   /* you must complete the function */
-
 }
 
 void ID_stage()
 {
-  /* you must complete the function */
+    /* you must complete the function */
     if (FE_latch->op_valid == true) {
         Op* op = FE_latch->op;
 
-        if (op->num_src >= 1 && (op->src[0] == EX_latch->op->dst || op->src[0] == MEM_latch->op->dst))
+        if (op->num_src >= 1 && op->src[0] == EX_latch->op->dst)
+        {
             data_hazard_count++;
-        else if (op->num_src >= 2 && (op->src[1] == EX_latch->op->dst || op->src[1] == MEM_latch->op->dst))
+            cycle_count += 2;
+        }
+        else if (op->num_src >= 1 && op->src[0] == MEM_latch->op->dst) {
             data_hazard_count++;
+            cycle_count += 1;
+        }
+        else if (op->num_src >= 2 && op->src[1] == EX_latch->op->dst) {
+            data_hazard_count++;
+            cycle_count += 2;
+        }
+        else if (op->num_src >= 2 && op->src[1] == MEM_latch->op->dst)){
+            data_hazard_count++;
+            cycle_count += 1;
+        }
 
+        if (op->cftype != NOT_CF) {
+            control_hazard_count++;
+            cycle_count += 2;
+        }
         ID_latch->op = op;
         ID_latch->op_valid = true;
     }
@@ -450,6 +470,10 @@ void FE_stage()
 
   FE_latch->op = op;
   FE_latch->op_valid = true;
+  if (op->opcode != OP_NOP)
+  {
+      active_op_num++;
+  }
 }
 
 
