@@ -385,11 +385,11 @@ void WB_stage()
     /* You MUST call free_op function here after an op is retired */
     /* you must complete the function */
     if (MEM_latch->op_valid == true) {
+        Op* op = MEM_latch->op;
         if (op->opcode != OP_NOP)
         {
             active_op_num--;
         }
-        Op* op = MEM_latch->op;
         free_op(op);
         retired_instruction++;
     }
