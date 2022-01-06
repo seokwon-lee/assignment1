@@ -181,6 +181,7 @@ typedef struct pipeline_latch_struct {
   Op *op; /* you must update this data structure. */
   bool op_valid; 
    /* you might add more data structures. But you should complete the above data elements */ 
+  int stall_count = 0;
 }pipeline_latch; 
 
 
@@ -361,6 +362,15 @@ return TRUE;
     ID_stage();
     FE_stage();
     if (KNOB(KNOB_PRINT_PIPE_FREQ)->getValue() && !(cycle_count % KNOB(KNOB_PRINT_PIPE_FREQ)->getValue())) print_pipeline();
+    /*end conditaion for the simulation: 시뮬레이션 종료 조건*/
+    int g;
+    if (active_op_num != 0) {
+        g = 5;
+    }
+    else
+        g--;
+    if (g == 0) sim_end_condition = true;
+
   }
   return TRUE;
 }
@@ -410,6 +420,12 @@ void MEM_stage()
 
         FE_latch->op->instruction_addr = op->branch_target;
         /* you must complete the function */
+
+        /*resume the pipeline, pc <- brach target*/
+        if (op->cf_type != NOT_CF) {
+            FE_latch->op_valid = true;
+            ID_latch->op_valid = true;
+        }
     }
 }
 
@@ -417,9 +433,29 @@ void EX_stage()
 {
     if (ID_latch->op_valid == true) {
         Op* op = ID_latch->op;
-        cycle_count += get_op_latency(op) - 1;//FE,ID stage stall 필요
+        if (get_op_latency(op) > 1) {
+            FE_latch->op_valid = false;
+            ID_latch->op_valid = false;//FE,ID stage stall 필요
+            FE_latch->stall_count = get_op_latency(op) - 1;
+            ID_latch->stall_count = get_op_latency(op) - 1; //stall 횟수 입력
+        }
+        register_file[op->dst].valid = false; //MEM stage dst
     }
   /* you must complete the function */
+    if (ID_latch->stall_count == 0)
+    {
+        FE_latch->op_valid = true;
+        ID_latch->op_valid = true; //resume
+    }
+    else {
+        FE_latch->stall_count--;
+        ID_latch->stall_count--;
+    }
+
+    if (op->cf_type != NOT_CF) {
+        FE_latch->op_valid = false;
+        ID_latch->op_valid = false;
+    }
 }
 
 void ID_stage()
@@ -428,30 +464,23 @@ void ID_stage()
     if (FE_latch->op_valid == true) {
         Op* op = FE_latch->op;
 
-        if (op->num_src >= 1 && op->src[0] == EX_latch->op->dst)
-        {
-            data_hazard_count++;
-            cycle_count += 2;
-        }
-        else if (op->num_src >= 1 && op->src[0] == MEM_latch->op->dst) {
-            data_hazard_count++;
-            cycle_count += 1;
-        }
-        else if (op->num_src >= 2 && op->src[1] == EX_latch->op->dst) {
-            data_hazard_count++;
-            cycle_count += 2;
-        }
-        else if (op->num_src >= 2 && op->src[1] == MEM_latch->op->dst){
-            data_hazard_count++;
-            cycle_count += 1;
-        }
-
-        if (op->cf_type != NOT_CF) {
-            control_hazard_count++;
-            cycle_count += 2;
-        }
         ID_latch->op = op;
         ID_latch->op_valid = true;
+
+        if (op->num_src >= 1 && register_file[op->src[0]].valid == false
+            || op->num_src == 2 && register_file[op->src[1]].valid == false)
+        {
+            data_harzard_count++;        
+            FE_latch->op_valid = false;
+            ID_latch->op_valid = false;
+        }
+        register_file[op->dst].valid = false; //EX stage dst
+
+        /*if op is a control flow, stall until it is addressed at the MEM stage*/
+        if (op->cf_type != NOT_CF) {
+            control_hazard_count++;
+            FE_latch->op_valid = false;
+        }
     }
 }
 
@@ -460,19 +489,18 @@ void FE_stage()
 {
   /* only part of FE_stage function is implemented */ 
   /* please complete the rest of FE_stage function */ 
-  Op *op = get_free_op();
-  get_op(op);
-  
-  //  next_pc = pc + op->inst_size;  // you need this code for building a branch predictor 
-  if (!icache_access(op->instruction_addr))
-      icache_miss_count++;
-
-  FE_latch->op = op;
-  FE_latch->op_valid = true;
-  if (op->opcode != OP_NOP)
-  {
-      active_op_num++;
-  }
+    if (FE_latch->op_valid == true) {
+        Op *op = get_free_op();
+        get_op(op);
+        //  next_pc = pc + op->inst_size;  // you need this code for building a branch predictor 
+        if (!icache_access(op->instruction_addr))
+            icache_miss_count++;
+            
+        if (op->opcode != OP_NOP)
+        {
+            active_op_num++;
+        }
+    }
 }
 
 
