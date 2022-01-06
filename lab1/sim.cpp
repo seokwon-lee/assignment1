@@ -384,23 +384,56 @@ void WB_stage()
 {
   /* You MUST call free_op function here after an op is retired */ 
   /* you must complete the function */
-
+  free_op(op);
+  retired_instruction++;
 }
 
 void MEM_stage()
-{
+{ 
+    if (op->mem_type == MEM_LD)
+        if (!dcache_access(op->ld_vaddr))
+            dcache_miss_count++;
+    if (op->mem_type == MEM_ST)
+        if (!dcache_access(op->st_vaddr))
+            dcache_miss_count++;
+    FE_latch->op->instruction_addr = op->branch_target;
   /* you must complete the function */
 }
 
 
 void EX_stage() 
 {
+    if (ID_latch->op_valid == true) {
+        Op* op = ID_latch->op;
+        if (op->opcode == OP_CF) {
+            control_hazard_count++;
+        }
+        int cycle_num = cycle_count;
+    }
+
+    if (cycle_count - cycle_num < get_op_latency(op)-1 )
+    {
+        FE_latch->op_valid = false; 
+        ID_latch->op_valid = false;
+    }//FE,ID stage stall ÇÊ¿ä
   /* you must complete the function */
+
 }
 
 void ID_stage()
 {
   /* you must complete the function */
+    if (FE_latch->op_valid == true) {
+        Op* op = FE_latch->op;
+
+        if (op->num_src >= 1 && (op->src[0] == EX_latch->op->dst || op->src[0] == MEM_latch->op->dst))
+            data_hazard_count++;
+        else if (op->num_src >= 2 && (op->src[1] == EX_latch->op->dst || op->src[1] == MEM_latch->op->dst))
+            data_hazard_count++;
+
+        ID_latch->op = op;
+        ID_latch->op_valid = true;
+    }
 }
 
 
@@ -408,13 +441,15 @@ void FE_stage()
 {
   /* only part of FE_stage function is implemented */ 
   /* please complete the rest of FE_stage function */ 
-
-
   Op *op = get_free_op();
-  get_op(op); 
+  get_op(op);
+  
+  //  next_pc = pc + op->inst_size;  // you need this code for building a branch predictor 
+  if (!icache_access(op->instruction_addr))
+      icache_miss_count++;
 
-  //   next_pc = pc + op->inst_size;  // you need this code for building a branch predictor 
-
+  FE_latch->op = op;
+  FE_latch->op_valid = true;
 }
 
 
