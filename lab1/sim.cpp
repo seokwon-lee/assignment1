@@ -10,6 +10,9 @@ bool run_a_cycle();
 void init_structures(); 
 
 
+/* My local functions*/
+void init_regfile(void);
+int total_cf_count=0;
 
 /* uop_pool related variables */ 
 
@@ -92,7 +95,7 @@ void init_op_latency(void)
   op_latency[OP_FDIV]  = 16; 
   op_latency[OP_FCMP]  = 2; 
   op_latency[OP_FBIT]  = 2; 
-  op_latency[OP_FCMP]  = 2; 
+  op_latency[OP_FCMO]  = 2; 
 }
 
 void init_op(Op *op)
@@ -181,12 +184,12 @@ typedef struct pipeline_latch_struct {
   Op *op; /* you must update this data structure. */
   bool op_valid; 
    /* you might add more data structures. But you should complete the above data elements */ 
-  int stall_count = 0;
 }pipeline_latch; 
 
 
 typedef struct Reg_element_struct{
   bool valid;
+  int count;
   // data is not needed 
   /* you might add more data structures. But you should complete the above data elements */ 
 }REG_element; 
@@ -216,6 +219,15 @@ UINT64 control_hazard_count = 0;
 UINT64 icache_miss_count = 0;      /* total number of icache misses. for Lab #2 and Lab #3 */ 
 UINT64 dcache_miss_count = 0;      /* total number of dcache  misses. for Lab #2 and Lab #3 */ 
 UINT64 l2_cache_miss_count = 0;    /* total number of L2 cache  misses. for Lab #2 and Lab #3 */  
+
+
+/*******************************************************************/
+/*  My Variables  */
+/*******************************************************************/
+int EX_latency_countdown = 0;
+bool control_stall = false;
+bool data_stall = false;
+bool read_trace_error = false;
 
 
 
@@ -254,14 +266,12 @@ bool get_op(Op *op)
   static UINT64 unique_count = 0; 
   Trace_op trace_op; 
   bool success = FALSE; 
-  // read trace 
-  // fill out op info 
-  // return FALSE if the end of trace 
+
   success = (gzread(g_stream, &trace_op, sizeof(Trace_op)) >0 );
   if (KNOB(KNOB_PRINT_INST)->getValue()) dprint_trace(&trace_op); 
 
   /* copy trace structure to op */ 
-  if (success) { 
+  if ( success ) { 
     copy_trace_op(&trace_op, op); 
 
     op->inst_id  = unique_count++;
@@ -288,7 +298,7 @@ void print_pipeline() {
   std::cout << "--------------------------------------------" << endl; 
   std::cout <<"cycle count : " << dec << cycle_count << " retired_instruction : " << retired_instruction << endl; 
   std::cout << (int)cycle_count << " FE: " ;
-  if (FE_latch->op) {
+  if (FE_latch->op_valid) {
     Op *op = FE_latch->op; 
     cout << (int)op->inst_id ;
   }
@@ -345,164 +355,193 @@ bool run_a_cycle(){
 
   for (;;) { 
     if (((KNOB(KNOB_MAX_SIM_COUNT)->getValue() && (cycle_count >= KNOB(KNOB_MAX_SIM_COUNT)->getValue())) || 
-(KNOB(KNOB_MAX_INST_COUNT)->getValue() && (retired_instruction >= KNOB(KNOB_MAX_INST_COUNT)->getValue())) || (sim_end_condition))) {
-// please complete sim_end_condition 
-// finish the simulation 
-print_heartbeat();
-print_stats();
-return TRUE;
+      (KNOB(KNOB_MAX_INST_COUNT)->getValue() && (retired_instruction >= KNOB(KNOB_MAX_INST_COUNT)->getValue())) ||  (sim_end_condition))) { 
+        // please complete sim_end_condition 
+        // finish the simulation 
+        print_heartbeat(); 
+        print_stats();
+        return TRUE; 
     }
-    cycle_count++;
-    if (!(cycle_count % 5000)) {
-        print_heartbeat();
+    cycle_count++; 
+    if (!(cycle_count%5000)) {
+      print_heartbeat(); 
     }
-    WB_stage();
+    WB_stage(); 
     MEM_stage();
     EX_stage();
     ID_stage();
-    FE_stage();
-    if (KNOB(KNOB_PRINT_PIPE_FREQ)->getValue() && !(cycle_count % KNOB(KNOB_PRINT_PIPE_FREQ)->getValue())) print_pipeline();
-    /*end conditaion for the simulation: 시뮬레이션 종료 조건*/
-    int g;
-    if (active_op_num != 0) {
-        g = 5;
-    }
-    else
-        g--;
-    if (g == 0) sim_end_condition = true;
-
+    FE_stage(); 
+    /*reverse order: each stage should get operations from the former stage of the "previous cycle"
+    if the order is FE->ID-> ... ->WB, then each stage should get operations from the former stage of the "current cycle"*/
+    if (KNOB(KNOB_PRINT_PIPE_FREQ)->getValue() && !(cycle_count%KNOB(KNOB_PRINT_PIPE_FREQ)->getValue())) print_pipeline();
   }
-  return TRUE;
+  return TRUE; 
 }
 
 
 /*******************************************************************/
 /* Complete the following fuctions.  */
-/* You can add new data structures and also new elements to Op, Pipeline_latch data structure */
+/* You can add new data structures and also new elements to Op, Pipeline_latch data structure */ 
 /*******************************************************************/
 
-void init_structures(void)
-{
-    init_op_pool();
-    init_op_latency();
-    /* please initialize other data stucturs */
-    /* you must complete the function */
-    init_latches();
+void init_structures(void) {
+  init_op_pool(); 
+  init_op_latency();
+  init_latches();
+  init_regfile();
 }
 
-void WB_stage()
-{
-    /* You MUST call free_op function here after an op is retired */
-    /* you must complete the function */
-    if (MEM_latch->op_valid == true) {
-        Op* op = MEM_latch->op;
-        if (op->opcode != OP_NOP)
-        {
-            active_op_num--;
-        }
-        free_op(op);
-        retired_instruction++;
+void WB_stage() {
+  if( MEM_latch->op_valid == true ) {
+    if((MEM_latch->op->opcode == OP_CF) && control_stall)
+      control_stall = false; 
+
+    /*implementaion of the resolution of the control hazard at mem stage*/
+    /*the actual pc determination of CF inst is at the end of the MEM stage, <- not EX stage?
+    and the fetching happens in IF(FE) of the following cycle. <- why not at the same cycle?
+    Therefore it should be implemented at the WB stage to prevent frome the CF resolution and fetching 
+    happening at the same cycle.
+    (The branch target address is forwarded at MEM stage)*/
+  	
+    /*resolution of data hazard; If WB stage writes a value to the register at first half cycle, ID can be 
+    successfully done if there is no instruction using that regsiter at EX or MEM stage.
+    register_file[register id].count indicates the number of instructions in EX or MEM stage(max 2) 
+    that has the register id as a dst(destination register); 
+    so that count is <0 or 1 or 2 at ID>, <0 or 1 at WB>
+    (if there is no dst in instruction, dst value sets to -1)*/
+    if( MEM_latch->op->dst!= -1 ) {
+      register_file[ MEM_latch->op->dst ].count--;
+
+      /*if the count is 0, it means no following insts of EX or MEM are having that register id as a destination.
+      After WB<<.. count--;>>, if the count becomes 0<<if(.. ==0)>>, it is safe to use the register as src(source)
+      */
+      if( register_file[ MEM_latch->op->dst ].count==0 ) {
+        register_file[ MEM_latch->op->dst ].valid = true;
+        if(data_stall)
+          data_stall = false;
+      } 
     }
+	
+    retired_instruction++;
+    free_op(MEM_latch->op);
+  }
 }
 
-void MEM_stage()
-{
-    if (EX_latch->op_valid == true) {
-        Op* op = EX_latch->op;
-        if (op->mem_type == MEM_LD)
-            if (!dcache_access(op->ld_vaddr)) {
-                dcache_miss_count++;
-            }
-        if (op->mem_type == MEM_ST) {
-            if (!dcache_access(op->st_vaddr))
-                dcache_miss_count++;
-        }
-
-        FE_latch->op->instruction_addr = op->branch_target;
-        /* you must complete the function */
-
-        /*resume the pipeline, pc <- brach target*/
-        if (op->cf_type != NOT_CF) {
-            FE_latch->op_valid = true;
-            ID_latch->op_valid = true;
-        }
-    }
+/*I think the implementation of the PC resolution should be in MEM or EX, not WB!*/
+void MEM_stage() {
+  //if( EX_latch->op_valid == true ) {
+  //  if((EX_latch->op->opcode == OP_CF) && control_stall)
+  //     control_stall = false;
+  //} 
+  MEM_latch->op = EX_latch->op;
+  MEM_latch->op_valid = EX_latch->op_valid;  
 }
 
-void EX_stage()
-{
-    if (ID_latch->op_valid == true) {
-        Op* op = ID_latch->op;
-        if (get_op_latency(op) > 1) {
-            FE_latch->op_valid = false;
-            ID_latch->op_valid = false;//FE,ID stage stall 필요
-            FE_latch->stall_count = get_op_latency(op) - 1;
-            ID_latch->stall_count = get_op_latency(op) - 1; //stall 횟수 입력
-        }
-        register_file[op->dst].valid = false; //MEM stage dst
-    }
-  /* you must complete the function */
-    if (ID_latch->stall_count == 0)
-    {
-        FE_latch->op_valid = true;
-        ID_latch->op_valid = true; //resume
-    }
-    else {
-        FE_latch->stall_count--;
-        ID_latch->stall_count--;
-    }
+/*EX stage
+======================================================
+ex stall         | send NOP to next stage
+------------------------------------------------------
+otherwise        | latch info delivery : ID -> EX 
+------------------------------------------------------
+*/
+void EX_stage() {
+  if( EX_latency_countdown > 0)
+  {
+    EX_latency_countdown--;
+  }
+  else if(ID_latch->op_valid){
+    EX_latency_countdown = get_op_latency(ID_latch->op)-1;
+  }
 
-    if (op->cf_type != NOT_CF) {
-        FE_latch->op_valid = false;
-        ID_latch->op_valid = false;
-    }
+  if( EX_latency_countdown > 0){
+    EX_latch->op = NULL;
+    EX_latch->op_valid = false;
+  }
+  else{
+    EX_latch->op = ID_latch->op;
+    EX_latch->op_valid = ID_latch->op_valid;
+  }
 }
 
-void ID_stage()
-{
-    /* you must complete the function */
-    if (FE_latch->op_valid == true) {
-        Op* op = FE_latch->op;
+/*ID stage
+====================================================
+ex stall           | just hold
+----------------------------------------------------
+data hazard        | send NOP to next stage
+----------------------------------------------------
+control hazard     | latch info delivery : ID -> EX 
+& otherwise        |
+----------------------------------------------------
+*/
+void ID_stage() {
+  if( EX_latency_countdown > 0)
+    return;
 
-        ID_latch->op = op;
-        ID_latch->op_valid = true;
-
-        if (op->num_src >= 1 && register_file[op->src[0]].valid == false
-            || op->num_src == 2 && register_file[op->src[1]].valid == false)
-        {
-            data_harzard_count++;        
-            FE_latch->op_valid = false;
-            ID_latch->op_valid = false;
-        }
-        register_file[op->dst].valid = false; //EX stage dst
-
-        /*if op is a control flow, stall until it is addressed at the MEM stage*/
-        if (op->cf_type != NOT_CF) {
-            control_hazard_count++;
-            FE_latch->op_valid = false;
-        }
+  /*while execution stalling, hazard count do not increase*/
+  if( FE_latch->op_valid ) {
+    /* Checking for any source data hazard */   
+    for (int ii = 0; ii < FE_latch->op->num_src; ii++) {
+      if( register_file[ FE_latch->op->src[ii] ].valid == false ) {
+        data_hazard_count++;  
+        data_stall = true;
+        break;
+      }
     }
+    /* checking control hazard */
+    if(FE_latch->op->opcode == OP_CF){
+      control_hazard_count++;
+      control_stall = true;
+    }
+  }
+  
+  if ( data_stall ){
+    ID_latch->op = NULL;
+    ID_latch->op_valid = false;
+  }
+  else{
+    /* marking invalid registers : only when there is no (data or EX) stall*/ 
+    if( FE_latch->op_valid && FE_latch->op->dst != -1 ) {
+        register_file[ FE_latch->op->dst ].valid = false; 
+        register_file[ FE_latch->op->dst ].count++;
+    }
+    ID_latch->op = FE_latch->op;
+    ID_latch->op_valid = FE_latch->op_valid;
+  }
 }
 
-
-void FE_stage()
-{
-  /* only part of FE_stage function is implemented */ 
-  /* please complete the rest of FE_stage function */ 
-    if (FE_latch->op_valid == true) {
-        Op *op = get_free_op();
-        get_op(op);
-        //  next_pc = pc + op->inst_size;  // you need this code for building a branch predictor 
-        if (!icache_access(op->instruction_addr))
-            icache_miss_count++;
-            
-        if (op->opcode != OP_NOP)
-        {
-            active_op_num++;
-        }
+/*IF(FE) stage
+==================================================
+control hazard  | send NOP to next stage
+--------------------------------------------------
+otherwise       | just hold
+--------------------------------------------------
+*/
+void FE_stage() {
+ if( (EX_latency_countdown!=0) || (data_stall) ) {  //Execution stall or Data stall
+      FE_latch->op = FE_latch->op;
+      FE_latch->op_valid = FE_latch->op_valid;  
+  }
+  else if( control_stall ) {	//Control stall
+      FE_latch->op = NULL;
+      FE_latch->op_valid = false;    
+  }
+  /*why holds op in latch at EX or Data stall and send NOP when control stall?*/
+  else{ // if there is no stall, fetches an instruction
+    Op *op = get_free_op();
+    
+    if( get_op(op) ){  
+      FE_latch->op = op;
+      FE_latch->op_valid = true;  
+    } 
+    else { /*end of simulation if all latches are empty and if it is at the of the trace file(get_op(op) == false)*/
+      if((FE_latch->op_valid==false) && (ID_latch->op_valid==false) && (EX_latch->op_valid==false) && (MEM_latch->op_valid==false) ) 
+    	  sim_end_condition = true;
+    	FE_latch->op = NULL;
+      FE_latch->op_valid = false;  
+      free_op(op);    
     }
+  }
 }
-
 
 void  init_latches()
 {
@@ -522,6 +561,13 @@ void  init_latches()
   ID_latch->op_valid = false;
   FE_latch->op_valid = false;
 
+}
+
+void init_regfile() {
+  for (int ii = 0; ii < NUM_REG; ii++) {
+   register_file[ii].valid = true;
+   register_file[ii].count = 0;
+  }
 }
 
 bool icache_access(uint32_t addr) {
