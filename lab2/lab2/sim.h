@@ -117,7 +117,7 @@ void simulator_main(int argc, char** argv);
 
 extern uint64_t inst_count; 
 extern uint64_t cycle_count;  
-extern int get_dram_row_id(ADDRINT addr); // NEW-LAB2 
+extern int64_t get_dram_row_id(ADDRINT addr); // NEW-LAB2 
 extern int get_dram_bank_id(ADDRINT addr);  // NEW-LAB2 
 extern void dcache_insert(ADDRINT addr); // NEW-LAB2 
 extern void broadcast_rdy_op(Op* ops); // NEW-LAB2 

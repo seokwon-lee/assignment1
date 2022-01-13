@@ -76,8 +76,8 @@ class memory_c {
 
   /* dram structure */ 
   list <mem_req_s *>* dram_bank_sch_queue;  /* scheduler buffer for each DRAM bank */ 
-  int *dram_bank_open_row; 
-  int *dram_bank_rdy_cycle; 
+  int64_t *dram_bank_open_row; 
+  uint64_t *dram_bank_rdy_cycle; 
   
 
   m_mshr_entry_s * allocate_new_mshr_entry(void); 

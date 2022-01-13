@@ -9,6 +9,7 @@
 #include "knob.h"
 #include "all_knobs.h"
 
+extern uint64_t cold_misses;
 //************************************************************************************
 void cache_init(Cache *cache,unsigned int cache_size, int block_size,unsigned int assoc, const char *s)
 {
@@ -27,6 +28,7 @@ void cache_init(Cache *cache,unsigned int cache_size, int block_size,unsigned in
     /* create 2dimensional array size */
     cache->cache_entry[ii] = (Cache_Entry *) malloc(sizeof(Cache_Entry) * assoc);
     for( jj = 0 ; jj < assoc; jj++) {
+      cache->cache_entry[ii][jj].tag = 0; //Initialize the tag to 0
       cache->cache_entry[ii][jj].valid = false;
       cache->cache_entry[ii][jj].lru = 0;
       cache->cache_entry[ii][jj].dirty = false;
@@ -67,13 +69,15 @@ int cache_read(Cache *cache, ADDRINT addr)
   for(ii = 0; ii < cache->assoc; ii++) {
     if(cache->cache_entry[line_num][ii].tag == tag ) {   // tag match 
       if(cache->cache_entry[line_num][ii].valid == false) {  // data should be valid 
-	cache_cold = true;                      
+	cache_cold = true;
+  //cold_misses++;                      
       }
       //cache->cache_entry[line_num][ii].lru = cycle_count;    // update lru time 
       //cache->cache_entry[line_num][ii].valid = true;
 
       if(!cache_cold) { 
-	return HIT;
+        cache->cache_entry[line_num][ii].lru = cycle_count;
+	      return HIT;
       }
       else return MISS; // cache block was empty so we don't need to evict cache block 
     }

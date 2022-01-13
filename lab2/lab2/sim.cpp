@@ -12,7 +12,9 @@
 bool run_a_cycle(memory_c *m ); // please modify run_a_cycle function argument  /** NEW-LAB2 */ 
 void init_structures(memory_c *m); // please modify init_structures function argument  /** NEW-LAB2 */ 
 
-
+/* My local functions*/
+void init_regfile(void);
+int total_cf_count=0;
 
 /* uop_pool related variables */ 
 
@@ -23,8 +25,8 @@ Op *op_pool_free_head = NULL;
 
 /* simulator related local functions */ 
 
-bool icache_access(uint32_t addr); /** please change uint32_t to ADDRINT NEW-LAB2 */  
-bool dcache_access(uint32_t addr); /** please change uint32_t to ADDRINT NEW-LAB2 */   
+bool icache_access(ADDRINT addr); /** please change uint32_t to ADDRINT NEW-LAB2 */  
+bool dcache_access(ADDRINT addr); /** please change uint32_t to ADDRINT NEW-LAB2 */   
 void  init_latches(void);
 
 #include "knob.h"
@@ -195,6 +197,8 @@ typedef struct pipeline_latch_struct {
 
 typedef struct Reg_element_struct{
   bool valid;
+  //int count;
+  int latest_inst_id;
   // data is not needed 
   /* you might add more data structures. But you should complete the above data elements */ 
 }REG_element; 
@@ -211,6 +215,7 @@ void ID_stage();
 void EX_stage(); 
 void MEM_stage(memory_c *main_memory); // please modify MEM_stage function argument  /** NEW-LAB2 */ 
 void WB_stage(); 
+void MEM_WB_stage();
 
 /*******************************************************************/
 /*  These are the variables you'll have to write.  */ 
@@ -228,8 +233,21 @@ UINT64 l2_cache_miss_count = 0;    /* total number of L2 cache  misses. for Lab 
 UINT64 dram_row_buffer_hit_count = 0; /* total number of dram row buffer hit. for Lab #2 and Lab #3 */   // NEW-LAB2
 UINT64 dram_row_buffer_miss_count = 0; /* total number of dram row buffer hit. for Lab #2 and Lab #3 */   // NEW-LAB2
 UINT64 store_load_forwarding_count = 0;  /* total number of store load forwarding for Lab #2 and Lab #3 */  // NEW-LAB2
+list<unsigned long long int> oplist; //The broadcase op-ids
+list<unsigned long long int>::iterator op_iterator; //Iterator for broadcast ops
+/*******************************************************************/
+/*  My Variables  */
+/*******************************************************************/
+int MEM_latency_countdown = 0;
+int EX_latency_countdown = 0;
+bool control_stall = false;
+bool data_stall = false;
+bool read_trace_error = false;
+bool dcache_miss_and_full_mshr = false;
+int mem_ops_mshr = 0; // to check whether the mshr is empty to check the simulation end condition
 
-
+list<Op *> MEM_WB_latch; // MEM latch for storing OPs
+list<Op *>::iterator MEM_WB_latch_iterator; //MEM latches iterator
 pipeline_latch *MEM_latch;  
 pipeline_latch *EX_latch;
 pipeline_latch *ID_latch;
@@ -258,8 +276,7 @@ void print_stats() {
   out << "Total control hazard : " << control_hazard_count << endl; 
   out << "Total DRAM ROW BUFFER Hit: " << dram_row_buffer_hit_count << endl;  // NEW-LAB2
   out << "Total DRAM ROW BUFFER Miss: "<< dram_row_buffer_miss_count << endl;  // NEW-LAB2 
-  out <<" Total Store-load forwarding: " << store_load_forwarding_count << endl;  // NEW-LAB2 
-
+  out << "Total Store-load forwarding: " << store_load_forwarding_count << endl;  // NEW-LAB2 
   out.close();
 }
 
@@ -269,7 +286,7 @@ void print_stats() {
 
 bool get_op(Op *op)
 {
-  static UINT64 unique_count = 0; 
+  static UINT64 unique_count = 1; //0->1
   Trace_op trace_op; 
   bool success = FALSE; 
   // read trace 
@@ -303,6 +320,7 @@ void dump_reg() {
 }
 
 void print_pipeline() {
+  int flag = 0;
   std::cout << "--------------------------------------------" << endl; 
   std::cout <<"cycle count : " << dec << cycle_count << " retired_instruction : " << retired_instruction << endl; 
   std::cout << (int)cycle_count << " FE: " ;
@@ -330,13 +348,24 @@ void print_pipeline() {
     cout <<"####";
   }
 
-
-  std::cout << " MEM: " ;
+  if((int)oplist.size()!=0){
+	  for(op_iterator=oplist.begin(); op_iterator!=oplist.end(); ++op_iterator)
+	   {
+		   std::cout << " MEM_MSHR: " ;
+		   cout << *op_iterator ;
+		   flag=1;
+	   }
+	   oplist.clear();
+	}
   if (MEM_latch->op_valid) {
+	std::cout << " MEM_PIPE: " ;
     Op *op = MEM_latch->op; 
     cout << (int)op->inst_id ;
+    flag=1;
   }
-  else {
+
+  if(flag==0){
+	std::cout << " MEM: " ;
     cout <<"####";
   }
   cout << endl; 
@@ -374,9 +403,9 @@ bool run_a_cycle(memory_c *main_memory){   // please modify run_a_cycle function
     if (!(cycle_count%5000)) {
       print_heartbeat(); 
     }
-
+    MEM_WB_stage();
     main_memory->run_a_cycle();          // *NEW-LAB2 
-    
+
     WB_stage(); 
     MEM_stage(main_memory);  // please modify MEM_stage function argument  /** NEW-LAB2 */ 
     EX_stage();
@@ -400,43 +429,261 @@ void init_structures(memory_c *main_memory) // please modify init_structures fun
   /* please initialize other data stucturs */ 
   /* you must complete the function */
   init_latches();
+  init_regfile();
+  main_memory->init_mem();
+  data_cache = new Cache();
+  cache_init(data_cache, KNOB(KNOB_DCACHE_SIZE)->getValue(), KNOB(KNOB_BLOCK_SIZE)->getValue(),
+  KNOB(KNOB_DCACHE_WAY)->getValue() , "L1cache");
+  //64B block size
 }
 
-void WB_stage()
-{
-  /* You MUST call free_op function here after an op is retired */ 
-  /* you must complete the function */
-
+void MEM_WB_stage(){
+	for(MEM_WB_latch_iterator=MEM_WB_latch.begin(); MEM_WB_latch_iterator!=MEM_WB_latch.end(); ++MEM_WB_latch_iterator)
+	{
+	Op* op = *MEM_WB_latch_iterator;
+	if( op->dst!= -1 ) {
+    if(register_file[ op->dst ].latest_inst_id == op->inst_id){
+      register_file[ op->dst ].valid = true;
+      if(data_stall)
+        data_stall=false;
+    }
+  }	 
+	if(mem_ops_mshr>0)
+  {
+		 mem_ops_mshr--;
+  }
+    retired_instruction++; 
+    free_op(op);
+    dcache_miss_and_full_mshr = false;
+	}
+MEM_WB_latch.clear();
 }
 
-void MEM_stage(memory_c *main_memory)  // please modify MEM_stage function argument  /** NEW-LAB2 */ 
-{
-  /* you must complete the function */
+void WB_stage() {
+  if( MEM_latch->op_valid == true ) {
+    if((MEM_latch->op->opcode == OP_CF) && control_stall)
+      control_stall = false; 
+
+    /*implementaion of the resolution of the control hazard at mem stage*/
+    /*the actual pc determination of CF inst is at the end of the MEM stage, <- not EX stage?
+    and the fetching happens in IF(FE) of the following cycle. <- why not at the same cycle?
+    Therefore it should be implemented at the WB stage to prevent frome the CF resolution and fetching 
+    happening at the same cycle.
+    (The branch target address is forwarded at MEM stage)*/
+  	
+    /*resolution of data hazard; If WB stage writes a value to the register at first half cycle, ID can be 
+    successfully done if there is no instruction using that regsiter at EX or MEM stage.
+    register_file[register id].count indicates the number of instructions in EX or MEM stage(max 2) 
+    that has the register id as a dst(destination register); 
+    so that count is <0 or 1 or 2 at ID>, <0 or 1 at WB>
+    (if there is no dst in instruction, dst value sets to -1)*/
+    if( MEM_latch->op->dst!= -1 ) {
+      if(register_file[ MEM_latch->op->dst ].latest_inst_id == MEM_latch->op->inst_id){
+        register_file[ MEM_latch->op->dst ].valid = true;
+        if(data_stall)
+          data_stall=false;
+      }
+    }
+	
+    retired_instruction++;
+    free_op(MEM_latch->op);
+  }
 }
 
+/*I think the implementation of the PC resolution should be in MEM or EX, not WB!*/
+void MEM_stage(memory_c *main_memory) {
+  if(EX_latch->op_valid){
+    if(EX_latch->op->mem_type == NOT_MEM) { // NOT a MEM instruction: just pass through
+      MEM_latch->op = EX_latch->op;
+      MEM_latch->op_valid = EX_latch->op_valid;  
+      return;
+    }
+    if(EX_latch->op->opcode == OP_LD || EX_latch->op->opcode == OP_ST){
+      /*Inside the simulator, the simulator calls the dcache_access function at the last cycle of dcache access latency
+       to mimic the actual hardware more closely.*/
+      
+      /*ALWAYS CHECKS THE IF STATEMENT.*/
+      if(MEM_latency_countdown > 0){ //Waiting for an access to D-cache
+        MEM_latency_countdown--;
+      }
+      else{
+        MEM_latency_countdown = KNOB(KNOB_DCACHE_LATENCY)->getValue()-1;
+      }
 
-void EX_stage() 
-{
-  /* you must complete the function */
+      if( MEM_latency_countdown > 0){ //Send NOP while waiting..
+        MEM_latch->op = NULL;
+        MEM_latch->op_valid = false;
+        return;
+      }
+      /*if it comes to here, the instruction have waited for dcache latency, and now access it */
+
+      uint64_t cache_check_addr;
+      if(EX_latch->op->opcode == OP_LD)
+        cache_check_addr = EX_latch->op->ld_vaddr;
+      else if(EX_latch->op->opcode == OP_ST)
+        cache_check_addr = EX_latch->op->st_vaddr;
+
+      l2_cache_miss_count++;
+      if(dcache_miss_and_full_mshr==false && dcache_access(cache_check_addr)) //If a cache hit, the instruction will be moved to the WB stage.
+      {
+        MEM_latch->op = EX_latch->op;
+        MEM_latch->op_valid = EX_latch->op_valid;  
+        return;
+      }
+      else{
+        /*->cache miss case: non blocking cache  
+        Even if an instruction generates a cache miss,
+        the pipeline continues to execute if there are ready instructions.(next incoming instructions)*/
+        if(main_memory->store_load_forwarding(EX_latch->op)) //store-load forwarding. In this case, it works like cache hit.
+        { 
+          store_load_forwarding_count++;
+          MEM_latch->op = EX_latch->op;
+          MEM_latch->op_valid = EX_latch->op_valid; 
+          return;
+        }
+        
+        if( main_memory->check_piggyback(EX_latch->op) == true )//match in MSHR
+        {                 //search_matching_mshr is inside of check_piggyback
+          mem_ops_mshr++;  // increase the number of operations in mshr
+        } 
+        else{ //no match in MSHR
+          if(main_memory->insert_mshr(EX_latch->op)){
+            mem_ops_mshr++; // increase the number of operations in mshr
+            dcache_miss_and_full_mshr = false;
+            /*When there is a space in the MSHR, the processor can put a request into the MSHR. 
+            The mem stage can process a new instruction from the following cycle. 
+            If there is space in the MSHR, the processor creates an entry in the MSHR.*/
+          }
+          else{ //no space in MSHR; processor stalls
+            MEM_latency_countdown = 1; 
+            dcache_miss_and_full_mshr = true;
+            /*stall for one cycle.
+            if after one cycle, there is still no space in MSHR, keep stalling
+            */
+          }
+        }
+      }
+    }
+  }
+  else{ //NOP passing
+    MEM_latch->op = EX_latch->op;
+    MEM_latch->op_valid = EX_latch->op_valid;  
+  }
 }
 
-void ID_stage()
-{
-  /* you must complete the function */
+/*EX stage
+======================================================
+ex stall         | send NOP to next stage
+------------------------------------------------------
+otherwise        | latch info delivery : ID -> EX 
+------------------------------------------------------
+mem stall        | just hold
+------------------------------------------------------
+*/
+void EX_stage() {
+  /* the if statement order matters
+   EX_latency_count comes first, which means EX will
+   execute its operation regardless of mem stall
+   if there are remaining EX op cycles*/
+  if( EX_latency_countdown > 0)
+  {
+    EX_latency_countdown--;
+  }
+  else if(MEM_latency_countdown > 0)
+    return;
+  else if(ID_latch->op_valid){
+    EX_latency_countdown = get_op_latency(ID_latch->op)-1;
+  }
+
+  if( EX_latency_countdown > 0){
+    EX_latch->op = NULL;
+    EX_latch->op_valid = false;
+  }
+  else{
+    EX_latch->op = ID_latch->op;
+    EX_latch->op_valid = ID_latch->op_valid;
+  }
 }
 
+/*ID stage
+====================================================
+ex stall & mem stall  | just hold
+----------------------------------------------------
+data hazard           | send NOP to next stage
+----------------------------------------------------
+control hazard        | latch info delivery : ID -> EX 
+& otherwise           |
+----------------------------------------------------
+*/
+void ID_stage() {
+  if( (EX_latency_countdown > 0) || (MEM_latency_countdown > 0)){
+    return;
+  }
 
-void FE_stage()
-{
-  /* only part of FE_stage function is implemented */ 
-  /* please complete the rest of FE_stage function */ 
+  /*while execution stalling, hazard count do not increase*/
+  if( FE_latch->op_valid ) {
+    /* Checking for any source data hazard */   
+    for (int ii = 0; ii < FE_latch->op->num_src; ii++) {
+      if( register_file[ FE_latch->op->src[ii] ].valid == false ) {
+        data_hazard_count++;
+        data_stall = true;
+        break;
+      }
+    }
+    /* checking control hazard */
+    if(FE_latch->op->opcode == OP_CF){
+      control_hazard_count++;
+      control_stall = true;
+    }
+  }
+  
+  if ( data_stall ){
+    ID_latch->op = NULL;
+    ID_latch->op_valid = false;
+  }
+  else{
+    /* marking invalid registers : only when there is no (data or EX) stall*/ 
+    if( FE_latch->op_valid && FE_latch->op->dst != -1 ) {
+        register_file[ FE_latch->op->dst ].valid = false; 
+        register_file[ FE_latch->op->dst ].latest_inst_id = FE_latch->op->inst_id;
+    }
+    ID_latch->op = FE_latch->op;
+    ID_latch->op_valid = FE_latch->op_valid;
+  }
+}
 
-
-  Op *op = get_free_op();
-  get_op(op); 
-
-  //   next_pc = pc + op->inst_size;  // you need this code for building a branch predictor 
-
+/*IF(FE) stage
+==================================================
+control hazard  | send NOP to next stage
+--------------------------------------------------
+otherwise       | just hold
+--------------------------------------------------
+*/
+void FE_stage() {
+  if( (EX_latency_countdown!=0) || (data_stall) || (MEM_latency_countdown!=0)) {  //Execution stall or Data stall or mem stall
+      FE_latch->op = FE_latch->op;
+      FE_latch->op_valid = FE_latch->op_valid;
+  }
+  else if( control_stall ) {	//Control stall
+      FE_latch->op = NULL;
+      FE_latch->op_valid = false;    
+  }
+  /*why holds op in latch at EX or Data stall and send NOP when control stall?*/
+  else{ // if there is no stall, fetches an instruction
+    Op *op = get_free_op();
+    
+    if( get_op(op) ){  
+      FE_latch->op = op;
+      FE_latch->op_valid = true;  
+    } 
+    else { /*end of simulation if all latches are empty and if it is at the of the trace file(get_op(op) == false)*/
+      if((FE_latch->op_valid==false) && (ID_latch->op_valid==false) && (EX_latch->op_valid==false) && (MEM_latch->op_valid==false) && mem_ops_mshr == 0) 
+    	  sim_end_condition = true;
+    	FE_latch->op = NULL;
+      FE_latch->op_valid = false;  
+      free_op(op);    
+    }
+  }
 }
 
 
@@ -457,7 +704,13 @@ void  init_latches()
   EX_latch->op_valid = false;
   ID_latch->op_valid = false;
   FE_latch->op_valid = false;
+}
 
+void init_regfile() {
+  for (int ii = 0; ii < NUM_REG; ii++) {
+   register_file[ii].valid = true;
+   register_file[ii].latest_inst_id = -1;
+  }
 }
 
 bool icache_access(ADDRINT addr) {   /** please change uint32_t to ADDRINT NEW-LAB2 */ 
@@ -473,11 +726,18 @@ bool dcache_access(ADDRINT addr) { /** please change uint32_t to ADDRINT NEW-LAB
   /* For Lab #1, you assume that all D-cache hit */     
   /* For Lab #2, you need to connect cache here */   // NEW-LAB2 
   bool hit = FALSE;
-  if (KNOB(KNOB_PERFECT_DCACHE)->getValue()) hit = TRUE; 
-  return hit; 
+  if (KNOB(KNOB_PERFECT_DCACHE)->getValue()) {hit = TRUE;} 
+  else if(cache_access(data_cache, addr) != false){
+    hit = TRUE;
+    dcache_hit_count ++;
+  }
+  else{
+    hit = FALSE;
+    if(dcache_miss_and_full_mshr == false)
+      dcache_miss_count++;
+  }
+  return hit;
 }
-
-
 
 // NEW-LAB2 
 void dcache_insert(ADDRINT addr)  // NEW-LAB2 
@@ -491,19 +751,30 @@ void broadcast_rdy_op(Op* op)             // NEW-LAB2
 {                                          // NEW-LAB2 
   /* you must complete the function */     // NEW-LAB2 
   // mem ops are done.  move the op into WB stage   // NEW-LAB2 
+
+  /* if mem op finished DRAM access, 
+  all the mem ops of the corresponding MSHR entry 
+  moves to WB stage*/ 
+  MEM_WB_latch.push_back(op);
+  oplist.push_back(op->inst_id);
 }      // NEW-LAB2 
 
 
 
 /* utility functions that you might want to implement */     // NEW-LAB2 
-int get_dram_row_id(ADDRINT addr)    // NEW-LAB2 
+int64_t get_dram_row_id(ADDRINT addr)    // NEW-LAB2 
 {  // NEW-LAB2 
  // NEW-LAB2 
 /* utility functions that you might want to implement */     // NEW-LAB2 
 /* if you want to use it, you should find the right math! */     // NEW-LAB2 
 /* pleaes carefull with that DRAM_PAGE_SIZE UNIT !!! */     // NEW-LAB2 
   // addr >> 6;   // NEW-LAB2 
-  return 2;   // NEW-LAB2 
+
+  /* addr as an imput, dram row id as an output
+  ->how can I get dram row id out of address? */
+  //addr = addr >> 6; //which byte in cacheline -> 6bits
+  int64_t row_id = addr/(KNOB(KNOB_DRAM_PAGE_SIZE)->getValue() * 1024);
+  return row_id;   // NEW-LAB2 
 }  // NEW-LAB2 
 
 int get_dram_bank_id(ADDRINT addr)  // NEW-LAB2 
@@ -511,9 +782,11 @@ int get_dram_bank_id(ADDRINT addr)  // NEW-LAB2
  // NEW-LAB2 
 /* utility functions that you might want to implement */     // NEW-LAB2 
 /* if you want to use it, you should find the right math! */     // NEW-LAB2 
-
-  // (addr >> 6);   // NEW-LAB2 
-  return 1;   // NEW-LAB2 
+  
+  /*addr as an input, dram bank id as an output*/
+  //addr = addr >> 6;   // NEW-LAB2 
+  int bank_id = (addr/(KNOB(KNOB_DRAM_PAGE_SIZE)->getValue()*1024))%(KNOB(KNOB_DRAM_BANK_NUM)->getValue());
+  return bank_id;   // NEW-LAB2 
 }  // NEW-LAB2 
 
 

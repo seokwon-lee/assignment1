@@ -1,0 +1,12 @@
+Total instruction: 288523
+Total cycles: 1043550
+IPC: 0.276482
+Total I-cache miss: 0
+Total D-cache hit: 87637
+Total D-cache miss: 4081
+Total L2-cache miss: 91718
+Total data hazard: 53652
+Total control hazard : 70273
+Total DRAM ROW BUFFER Hit: 1883
+Total DRAM ROW BUFFER Miss: 613
+Total Store-load forwarding: 4

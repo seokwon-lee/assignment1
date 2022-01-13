@@ -10,7 +10,9 @@
 /* Memory Related frame */ 
 /*******************************************************************/
 /* You do not need to change the code in this part                 */ 
-
+extern bool queue_empty;
+extern uint64_t dram_row_buffer_hit_count;
+extern uint64_t dram_row_buffer_miss_count;
 
 void memory_c::dprint_queues(void) 
 {
@@ -191,14 +193,13 @@ void memory_c::init_mem()
   dram_out_queue.clear();
   
   dram_bank_sch_queue = new list<mem_req_s*>[m_dram_bank_num]; 
-  dram_bank_open_row = new int[m_dram_bank_num];
+  dram_bank_open_row = new int64_t[m_dram_bank_num];
+  dram_bank_rdy_cycle = new uint64_t[m_dram_bank_num]; 
   for(int ii=0;ii<m_dram_bank_num;ii++)
   {
     dram_bank_open_row[ii]=-1;
+    dram_bank_rdy_cycle[ii]=0;
   }
-  dram_bank_rdy_cycle = new int[m_dram_bank_num]; 
-  
-  
 }
 
 /*******************************************************************/
@@ -411,23 +412,28 @@ bool memory_c::check_piggyback(Op *mem_op)
 /*******************************************************************/
 
 void memory_c::send_bus_in_queue() {
- 
+
    /* For Lab #2, you need to fill out this function */ 
+   /*Traverse all MSHR entries. 
+   If there is a new MSHR entry (i.e., m_stat == MEM_NEW), 
+   and insert the new memory request into dram_in_queue. 
+   (Caution!: Do not delete the MSHR entry.
+    The simulator should keep the MSHR entry.) 
+    At one cycle, we only insert only one memory request into the dram_in_queue.*/
+    //if(m_mshr.empty())
+    //  return;
+    for(list<m_mshr_entry_s *>::iterator req = m_mshr.begin(); req != m_mshr.end(); req++){
+      if(!(*req)->valid) //skip invalid MSHR entry
+        continue;
+      if((*req)->m_mem_req->m_state == MEM_NEW){
+        (*req)->m_mem_req->m_state = MEM_DRAM_IN;
+        dram_in_queue.push_back((*req)->m_mem_req);
+        return;
+      }
+    }
   
   // *END**** This is for the TA
 } 
-
-
-
-/*******************************************************************/
-/* search from dram_schedule queue and scheule a request 
-/*******************************************************************/
-
- void memory_c::dram_schedule() {
-
-   /* For Lab #2, you need to fill out this function */ 
-   
-}
 
 
 /*******************************************************************/
@@ -436,23 +442,68 @@ void memory_c::send_bus_in_queue() {
 
 void memory_c::push_dram_sch_queue()
 {
-  
-
+  //dram_in_queue -> dram_bank_sch_queue
   /* For Lab #2, you need to fill out this function */ 
-   
+  if(dram_in_queue.empty())
+    return;
+  mem_req_s* req = dram_in_queue.front();
+  //for lists, begin() returns an iterator whereas front() returns an element
+  int bank_id = get_dram_bank_id(req->m_addr);
+  dram_bank_sch_queue[bank_id].push_back(req); 
+  dram_in_queue.pop_front();
 }
+
+/*******************************************************************/
+/* search from dram_schedule queue and scheule a request 
+/*******************************************************************/
+
+
+void memory_c::dram_schedule() {
+   /* For Lab #2, you need to fill out this function */ 
+   /*Traverse all entries in dram_bank_sch_queue and if there is an unscheduled memory request, 
+   check the corresponding DRAM bank and see whether the DRAM bank is available.*/
+  for(int bank_id=0; bank_id < m_dram_bank_num; bank_id++){
+    if(dram_bank_sch_queue[bank_id].empty()) continue;
+    mem_req_s * req = dram_bank_sch_queue[bank_id].front(); 
+    if(req->m_state == MEM_DRAM_IN) //unscheduled memory request
+    {
+      if(dram_bank_rdy_cycle[bank_id] < cycle_count){ //the bank is available
+        req->m_state = MEM_DRAM_SCH;
+        if(get_dram_row_id(req->m_addr) == dram_bank_open_row[bank_id]){ //row buffer hit!
+          dram_row_buffer_hit_count++;
+          dram_bank_rdy_cycle[bank_id] = req->m_rdy_cycle = cycle_count + KNOB(KNOB_MEM_LATENCY_ROW_HIT)->getValue();
+        }
+        else{ //row buffer miss!
+          dram_row_buffer_miss_count++;
+          dram_bank_rdy_cycle[bank_id] = req->m_rdy_cycle = cycle_count + KNOB(KNOB_MEM_LATENCY_ROW_MISS)->getValue();
+          dram_bank_open_row[bank_id] = get_dram_row_id(req->m_addr);
+        }
+      }
+    }
+  } 
+}
+
 
 /*******************************************************************/
 /* send bus_out_queue 
 /*******************************************************************/
 
+
 void memory_c::send_bus_out_queue() 
 {
 
    /* For Lab #2, you need to fill out this function */ 
-
-  
+  for(int i=0; i < m_dram_bank_num; i++){
+    if(dram_bank_sch_queue[i].empty()) continue;
+    mem_req_s * req = dram_bank_sch_queue[i].front();
+    if(req->m_rdy_cycle < cycle_count && req->m_state == MEM_DRAM_SCH){
+      req->m_state = MEM_DRAM_OUT;
+      dram_bank_sch_queue[i].pop_front();
+      dram_out_queue.push_back(req);
+    }
+  }
 }
+
 
 
 /*******************************************************************/
@@ -470,6 +521,7 @@ void memory_c::fill_queue()
     mem_req_s *req = dram_out_queue.front(); 
     dram_out_queue.pop_front(); 
     
+    dcache_insert(req->m_addr); //received cacheline from DRAM should be inserted into cache
     /* search for matching mshr  entry */ 
     m_mshr_entry_s *entry = search_matching_mshr(req->m_addr); 
     
@@ -495,11 +547,39 @@ void memory_c::fill_queue()
 /*******************************************************************/
 /*  store-load forwarind features, cache addresses, cache load/store types 
 /*******************************************************************/
-
-
 bool memory_c::store_load_forwarding(Op *mem_op)
 {
-
+  
   /* For Lab #2, you need to fill out this function */ 
+  bool match = false; 
+  ADDRINT req_size = 1;
 
+  ADDRINT addr;
+  if (mem_op->mem_type == MEM_LD) {
+    addr = mem_op->ld_vaddr; 
+    req_size = (ADDRINT)mem_op->mem_read_size;
+  }
+  else {
+    return false;
+  }
+    
+  m_mshr_entry_s *entry = search_matching_mshr(addr);
+  
+  if(entry == NULL)
+  {
+    return false;
+  }
+  else {
+    if(entry->m_mem_req->m_type == MRT_DSTORE) // if the matched mshr's request by store instruction
+    {
+      ADDRINT start_addr = entry->m_mem_req->m_addr; 
+      ADDRINT end_addr = start_addr + (ADDRINT) entry->m_mem_req->m_size; 
+      if ((start_addr <= addr) && (end_addr >= (addr+req_size))) {
+       return true;
+      }
+    }
+    return false;
+  }
 }
+
+
